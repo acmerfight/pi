@@ -296,6 +296,7 @@ agent.state.tools = [myTool];
 agent.toolExecution = "sequential";
 agent.beforeToolCall = async ({ toolCall }) => undefined;
 agent.afterToolCall = async ({ toolCall, result }) => undefined;
+agent.shouldStopAfterTurn = async ({ context }) => shouldCompactBeforeNextTurn(context.messages);
 agent.state.messages = newMessages; // top-level array is copied
 agent.state.messages.push(message);
 agent.reset();
