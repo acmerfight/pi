@@ -487,7 +487,7 @@ describe("extensions discovery", () => {
 			export default function(pi) {
 				pi.registerFlag("my-flag", {
 					description: "My custom flag",
-					handler: async (value) => {},
+					type: "boolean",
 				});
 			}
 		`;

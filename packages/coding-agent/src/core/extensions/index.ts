@@ -70,6 +70,7 @@ export type {
 	ExtensionEvent,
 	ExtensionFactory,
 	ExtensionFlag,
+	ExtensionFlagOptions,
 	ExtensionHandler,
 	ExtensionMode,
 	// Runtime
