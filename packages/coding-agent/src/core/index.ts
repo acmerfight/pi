@@ -52,6 +52,7 @@ export {
 	type ExtensionEvent,
 	type ExtensionFactory,
 	type ExtensionFlag,
+	type ExtensionFlagOptions,
 	type ExtensionHandler,
 	ExtensionRunner,
 	type ExtensionShortcut,

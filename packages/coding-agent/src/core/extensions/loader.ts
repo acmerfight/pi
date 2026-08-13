@@ -293,9 +293,15 @@ function createExtensionAPI(
 
 		registerFlag(name: string, options: ExtensionFlagOptions): void {
 			runtime.assertActive();
-			if (options.default !== undefined && typeof options.default !== options.type) {
+			const flagType: unknown = options?.type;
+			if (flagType !== "boolean" && flagType !== "string") {
 				throw new Error(
-					`Invalid default for extension flag "--${name}": expected ${options.type}, received ${typeof options.default}`,
+					`Invalid type for extension flag "--${name}": expected boolean or string, received ${String(flagType)}`,
+				);
+			}
+			if (options.default !== undefined && typeof options.default !== flagType) {
+				throw new Error(
+					`Invalid default for extension flag "--${name}": expected ${flagType}, received ${typeof options.default}`,
 				);
 			}
 			extension.flags.set(name, { name, extensionPath: extension.path, ...options });

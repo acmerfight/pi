@@ -648,7 +648,7 @@ describe("ExtensionRunner", () => {
 				export default function(pi) {
 					pi.registerFlag("my-flag", {
 						description: "My flag",
-						handler: async () => {},
+						type: "boolean",
 					});
 				}
 			`;
@@ -696,7 +696,7 @@ describe("ExtensionRunner", () => {
 				export default function(pi) {
 					pi.registerFlag("test-flag", {
 						description: "Test flag",
-						handler: async () => {},
+						type: "boolean",
 					});
 				}
 			`;
