@@ -37,6 +37,7 @@ import type {
 	Extension,
 	ExtensionAPI,
 	ExtensionFactory,
+	ExtensionFlagOptions,
 	ExtensionRuntime,
 	LoadExtensionsResult,
 	MarkdownTransformer,
@@ -290,11 +291,13 @@ function createExtensionAPI(
 			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
 		},
 
-		registerFlag(
-			name: string,
-			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
-		): void {
+		registerFlag(name: string, options: ExtensionFlagOptions): void {
 			runtime.assertActive();
+			if (options.default !== undefined && typeof options.default !== options.type) {
+				throw new Error(
+					`Invalid default for extension flag "--${name}": expected ${options.type}, received ${typeof options.default}`,
+				);
+			}
 			extension.flags.set(name, { name, extensionPath: extension.path, ...options });
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
 				runtime.flagValues.set(name, options.default);

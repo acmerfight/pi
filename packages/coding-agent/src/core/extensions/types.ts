@@ -1188,6 +1188,18 @@ export interface ResolvedCommand extends RegisteredCommand {
 // Extension API
 // ============================================================================
 
+export type ExtensionFlagOptions =
+	| {
+			description?: string;
+			type: "boolean";
+			default?: boolean;
+	  }
+	| {
+			description?: string;
+			type: "string";
+			default?: string;
+	  };
+
 /** Handler function type for events */
 // biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
@@ -1269,14 +1281,7 @@ export interface ExtensionAPI {
 	): void;
 
 	/** Register a CLI flag. */
-	registerFlag(
-		name: string,
-		options: {
-			description?: string;
-			type: "boolean" | "string";
-			default?: boolean | string;
-		},
-	): void;
+	registerFlag(name: string, options: ExtensionFlagOptions): void;
 
 	/** Get the value of a registered CLI flag. */
 	getFlag(name: string): boolean | string | undefined;
@@ -1537,13 +1542,10 @@ export interface RegisteredTool {
 	sourceInfo: SourceInfo;
 }
 
-export interface ExtensionFlag {
+export type ExtensionFlag = ExtensionFlagOptions & {
 	name: string;
-	description?: string;
-	type: "boolean" | "string";
-	default?: boolean | string;
 	extensionPath: string;
-}
+};
 
 export interface ExtensionShortcut {
 	shortcut: KeyId;
