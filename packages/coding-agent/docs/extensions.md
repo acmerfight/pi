@@ -1625,6 +1625,8 @@ pi.registerShortcut("ctrl+shift+p", {
 
 Register a CLI flag.
 
+`type` must be `"boolean"` or `"string"`, and `default` must match it. Invalid registrations cause the extension to fail loading.
+
 ```typescript
 pi.registerFlag("plan", {
   description: "Start in plan mode",

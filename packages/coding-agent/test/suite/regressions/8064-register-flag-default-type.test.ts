@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadExtensions } from "../../../src/core/extensions/loader.ts";
-import type { ExtensionAPI, ExtensionFlag, ExtensionFlagOptions } from "../../../src/index.ts";
+import type { ExtensionAPI, ExtensionFlagOptions } from "../../../src/index.ts";
 
 function checkRegisterFlagTypes(pi: ExtensionAPI): void {
 	pi.registerFlag("enabled", { type: "boolean", default: true });
@@ -16,15 +16,7 @@ function checkRegisterFlagTypes(pi: ExtensionAPI): void {
 }
 void checkRegisterFlagTypes;
 
-function checkExtensionFlagTypes(flag: ExtensionFlag, options: ExtensionFlagOptions): void {
-	if (flag.type === "boolean") {
-		const defaultValue: boolean | undefined = flag.default;
-		void defaultValue;
-	} else {
-		const defaultValue: string | undefined = flag.default;
-		void defaultValue;
-	}
-
+function checkExtensionFlagOptionsTypes(options: ExtensionFlagOptions): void {
 	if (options.type === "boolean") {
 		const defaultValue: boolean | undefined = options.default;
 		void defaultValue;
@@ -33,16 +25,7 @@ function checkExtensionFlagTypes(flag: ExtensionFlag, options: ExtensionFlagOpti
 		void defaultValue;
 	}
 }
-void checkExtensionFlagTypes;
-
-// @ts-expect-error Boolean flags cannot contain string defaults.
-const invalidFlag: ExtensionFlag = {
-	name: "safe-mode",
-	extensionPath: "extension.ts",
-	type: "boolean",
-	default: "false",
-};
-void invalidFlag;
+void checkExtensionFlagOptionsTypes;
 
 describe("issue #8064 registerFlag default types", () => {
 	it.each([

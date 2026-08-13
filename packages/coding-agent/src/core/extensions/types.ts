@@ -1542,10 +1542,13 @@ export interface RegisteredTool {
 	sourceInfo: SourceInfo;
 }
 
-export type ExtensionFlag = ExtensionFlagOptions & {
+export interface ExtensionFlag {
 	name: string;
+	description?: string;
+	type: "boolean" | "string";
+	default?: boolean | string;
 	extensionPath: string;
-};
+}
 
 export interface ExtensionShortcut {
 	shortcut: KeyId;
