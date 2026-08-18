@@ -335,6 +335,7 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	private _pendingSupersededEntryIds: string[] = [];
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -610,8 +611,8 @@ export class AgentSession {
 		}
 	}
 
-	// Track last assistant message for auto-compaction check
-	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
+	// Track the persisted assistant entry for post-run retry and compaction checks.
+	private _lastAssistantEntry: { message: AssistantMessage; entryId: string } | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
@@ -645,6 +646,7 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let messageEntryId: string | undefined;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -660,13 +662,17 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				const supersedesEntryIds = event.message.role === "assistant" ? this._pendingSupersededEntryIds : [];
+				messageEntryId = this.sessionManager.appendMessage(event.message, supersedesEntryIds);
+				if (supersedesEntryIds.length > 0) {
+					this._pendingSupersededEntryIds = [];
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			// Track assistant message for auto-compaction (checked on agent_end)
-			if (event.message.role === "assistant") {
-				this._lastAssistantMessage = event.message;
+			if (event.message.role === "assistant" && messageEntryId) {
+				this._lastAssistantEntry = { message: event.message, entryId: messageEntryId };
 
 				const assistantMsg = event.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
@@ -712,6 +718,31 @@ export class AgentSession {
 			}
 		}
 		return undefined;
+	}
+
+	private _findMessageEntryId(message: AgentMessage): string | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message === message) {
+				return entry.id;
+			}
+		}
+		return undefined;
+	}
+
+	private _removeAssistantMessage(message: AssistantMessage): void {
+		const messages = this.agent.state.messages;
+		const messageIndex = messages.lastIndexOf(message);
+		if (messageIndex >= 0) {
+			this.agent.state.messages = [...messages.slice(0, messageIndex), ...messages.slice(messageIndex + 1)];
+		}
+	}
+
+	private _markEntrySuperseded(entryId: string): void {
+		if (!this._pendingSupersededEntryIds.includes(entryId)) {
+			this._pendingSupersededEntryIds.push(entryId);
+		}
 	}
 
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
@@ -1082,13 +1113,14 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
-		const msg = this._lastAssistantMessage;
-		this._lastAssistantMessage = undefined;
-		if (!msg) {
+		const assistantEntry = this._lastAssistantEntry;
+		this._lastAssistantEntry = undefined;
+		if (!assistantEntry) {
 			return false;
 		}
+		const { message: msg, entryId } = assistantEntry;
 
-		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
+		if (this._isRetryableError(msg) && (await this._prepareRetry(msg, entryId))) {
 			return true;
 		}
 
@@ -1102,7 +1134,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
+		if (await this._checkCompaction(msg, true, entryId)) {
 			return true;
 		}
 
@@ -1994,7 +2026,11 @@ export class AgentSession {
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		assistantEntryId?: string,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2056,14 +2092,18 @@ export class AgentSession {
 				return false;
 			}
 
-			// Case 1: remove the failed or truncated message from agent state, compact, and
-			// retry once. The message remains in session history but is excluded from retry context.
-			this._overflowRecoveryAttempted = true;
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
+			// Case 1: compact without the failed or truncated message, then retry once.
+			// The replacement assistant entry records which persisted attempt it supersedes.
+			const supersededEntryId = assistantEntryId ?? this._findMessageEntryId(assistantMessage);
+			if (!supersededEntryId) {
+				return false;
 			}
-			return await this._runAutoCompaction("overflow", willRetry);
+			this._overflowRecoveryAttempted = true;
+			const shouldContinue = await this._runAutoCompaction("overflow", willRetry, [supersededEntryId]);
+			if (shouldContinue) {
+				this._markEntrySuperseded(supersededEntryId);
+			}
+			return shouldContinue;
 		}
 
 		// Case 3: threshold compaction without retry.
@@ -2107,7 +2147,11 @@ export class AgentSession {
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		additionalSupersededEntryIds: readonly string[] = [],
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		let started = false;
 		let fromExtension = false;
@@ -2121,7 +2165,7 @@ export class AgentSession {
 
 			const pathEntries = this.sessionManager.getBranch();
 
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareCompaction(pathEntries, settings, additionalSupersededEntryIds);
 			if (!preparation) {
 				return false;
 			}
@@ -2221,7 +2265,7 @@ export class AgentSession {
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const sessionContext = this.sessionManager.buildSessionContext(additionalSupersededEntryIds);
 			this.agent.state.messages = sessionContext.messages;
 			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 
@@ -2251,15 +2295,6 @@ export class AgentSession {
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
 			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				// The overflow response was persisted on message_end before _checkCompaction() removed it
-				// from agent state. Rebuilding state from the new compaction can restore that kept entry,
-				// leaving an assistant as the final message. agent.continue() rejects that state, so remove
-				// the retriable error or truncated-length response again before continuing the interrupted turn.
-				if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
-					this.agent.state.messages = messages.slice(0, -1);
-				}
 				return true;
 			}
 
@@ -2756,7 +2791,7 @@ export class AgentSession {
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
-	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
+	private async _prepareRetry(message: AssistantMessage, entryId: string): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
@@ -2780,12 +2815,6 @@ export class AgentSession {
 			errorMessage: message.errorMessage || "Unknown error",
 		});
 
-		// Remove error message from agent state (keep in session for history)
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
-
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
@@ -2805,6 +2834,8 @@ export class AgentSession {
 			this._retryAbortController = undefined;
 		}
 
+		this._removeAssistantMessage(message);
+		this._markEntrySuperseded(entryId);
 		return true;
 	}
 

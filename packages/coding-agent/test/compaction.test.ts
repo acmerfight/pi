@@ -12,6 +12,7 @@ import {
 	estimateContextTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	prepareBranchEntries,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.ts";
@@ -372,6 +373,58 @@ describe("findCutPoint", () => {
 		expect(customFitsBudget.firstKeptEntryIndex).toBe(2);
 		expect(customFitsBudget.isSplitTurn).toBe(false);
 		expect(customFitsBudget.turnStartIndex).toBe(-1);
+	});
+});
+
+describe("prepareCompaction with pending supersession", () => {
+	it("should not include the failed attempt in the recent-token budget", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("old turn ".repeat(100))),
+			createMessageEntry(createAssistantMessage("old response")),
+			createMessageEntry(createUserMessage("recent turn ".repeat(100))),
+			createMessageEntry(createAssistantMessage("recent response")),
+			createMessageEntry(createUserMessage("current turn")),
+			createMessageEntry(createAssistantMessage("failed attempt ".repeat(100))),
+		];
+		const failedEntry = entries[5];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 };
+
+		const preparation = prepareCompaction(entries, settings, [failedEntry.id]);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(entries[2].id);
+		expect(preparation!.isSplitTurn).toBe(false);
+		expect(extractText(preparation!.messagesToSummarize)).not.toContain("failed attempt");
+	});
+
+	it("should keep the failed assistant as a structural split point", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("oversized turn ".repeat(100))),
+			createMessageEntry(createAssistantMessage("failed attempt")),
+		];
+		const failedEntry = entries[1];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 };
+
+		const preparation = prepareCompaction(entries, settings, [failedEntry.id]);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(failedEntry.id);
+		expect(preparation!.isSplitTurn).toBe(true);
+		expect(extractText(preparation!.turnPrefixMessages)).toContain("oversized turn");
+		expect(extractText(preparation!.turnPrefixMessages)).not.toContain("failed attempt");
+	});
+});
+
+describe("prepareBranchEntries", () => {
+	it("should omit assistant attempts superseded on the branch", () => {
+		const userEntry = createMessageEntry(createUserMessage("hello"));
+		const failedEntry = createMessageEntry(createAssistantMessage("failed attempt"));
+		const replacementEntry = createMessageEntry(createAssistantMessage("replacement"));
+		replacementEntry.supersedesEntryIds = [failedEntry.id];
+
+		const preparation = prepareBranchEntries([userEntry, failedEntry, replacementEntry]);
+
+		expect(extractText(preparation.messages)).toBe("hello\nreplacement");
 	});
 });
 

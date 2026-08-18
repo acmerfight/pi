@@ -210,6 +210,14 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
 ```
 
+A replacement produced by automatic retry may include `supersedesEntryIds`. The referenced assistant attempts remain in the JSONL history and rendered transcript, but are omitted from model context on branches containing the replacement.
+
+```json
+{"type":"message","id":"d4e5f6a7","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:04.000Z","supersedesEntryIds":["b2c3d4e5"],"message":{"role":"assistant","content":[{"type":"text","text":"Recovered response"}],"provider":"anthropic","model":"claude-sonnet-4-5","usage":{...},"stopReason":"stop"}}
+```
+
+This is an additive version 3 field and does not require migration. Older readers ignore it and retain the previous replay behavior. Existing sessions without supersession metadata are unchanged because replacement relationships cannot be inferred safely.
+
 ### ModelChangeEntry
 
 Emitted when the user switches models mid-session.
@@ -327,12 +335,13 @@ Entries form a tree:
    - If `retainedTail` is present, it acts as a self-contained checkpoint and entries after the compaction are included
    - Otherwise entries from `firstKeptEntryId` to the compaction are included
    - Then entries after compaction are included
-3. Preserves non-message entries in the selected range so interactive mode can render them
+3. Preserves non-message and superseded entries in the selected range so interactive mode can render them
 
-`buildSessionContext()` builds on that entry list to produce the message list for the LLM:
+`buildSessionContext()` follows the same branch to produce the message list for the LLM:
 
-1. Extracts current model and thinking level settings from the full path
-2. Converts selected entries to messages:
+1. Omits assistant entries referenced by a later entry's `supersedesEntryIds`
+2. Extracts current model and thinking level settings from the filtered path
+3. Converts selected entries to messages:
    - `message` -> stored `AgentMessage`
    - `compaction` -> `compactionSummary` plus `retainedTail` when present
    - `branch_summary` -> `branchSummary`
@@ -404,7 +413,7 @@ Key methods for working with sessions programmatically.
 - `createBranchedSession(leafId)` - Extract branch to new session file
 
 ### Instance Methods - Appending (all return entry ID)
-- `appendMessage(message)` - Add message
+- `appendMessage(message, supersedesEntryIds?)` - Add message
 - `appendThinkingLevelChange(level)` - Record thinking change
 - `appendModelChange(provider, modelId)` - Record model change
 - `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?, fromHook?)` - Add compaction

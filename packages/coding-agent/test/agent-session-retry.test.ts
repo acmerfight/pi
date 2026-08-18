@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
@@ -146,6 +146,19 @@ describe("AgentSession retry", () => {
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
 		expect(created.session.isRetrying).toBe(false);
+		const assistantEntries = created.session.sessionManager
+			.getEntries()
+			.filter(
+				(entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "assistant",
+			);
+		expect(assistantEntries).toHaveLength(2);
+		expect(assistantEntries[1]?.supersedesEntryIds).toEqual([assistantEntries[0]?.id]);
+		expect(
+			created.session.sessionManager
+				.buildSessionContext()
+				.messages.filter((message) => message.role === "assistant")
+				.map((message) => (message.content[0]?.type === "text" ? message.content[0].text : "")),
+		).toEqual(["Success"]);
 	});
 
 	it("exhausts max retries and emits failure", async () => {
