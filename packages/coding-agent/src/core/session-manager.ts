@@ -11,6 +11,7 @@ import {
 	readdirSync,
 	readSync,
 	statSync,
+	truncateSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
@@ -516,6 +517,10 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
+	let lastNewlineEnd = 0;
+	let totalBytesRead = 0;
+	let hasUnterminatedTail = false;
+	let finalEntry: FileEntry | null = null;
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
@@ -526,7 +531,14 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
 
-			pending += decoder.write(buffer.subarray(0, bytesRead));
+			const chunk = buffer.subarray(0, bytesRead);
+			const lastNewlineIndex = chunk.lastIndexOf(0x0a);
+			if (lastNewlineIndex !== -1) {
+				lastNewlineEnd = totalBytesRead + lastNewlineIndex + 1;
+			}
+			totalBytesRead += bytesRead;
+
+			pending += decoder.write(chunk);
 			let lineStart = 0;
 			let newlineIndex = pending.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
@@ -539,7 +551,8 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		}
 
 		pending += decoder.end();
-		const finalEntry = parseSessionEntryLine(pending);
+		hasUnterminatedTail = pending.length > 0;
+		finalEntry = parseSessionEntryLine(pending);
 		if (finalEntry) entries.push(finalEntry);
 	} finally {
 		closeSync(fd);
@@ -550,6 +563,14 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return [];
+	}
+
+	if (hasUnterminatedTail) {
+		if (finalEntry) {
+			appendFileSync(resolvedFilePath, "\n");
+		} else {
+			truncateSync(resolvedFilePath, lastNewlineEnd);
+		}
 	}
 
 	return entries;
