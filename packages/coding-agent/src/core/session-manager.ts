@@ -511,10 +511,16 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 	}
 }
 
-/** Exported for testing */
-export function loadEntriesFromFile(filePath: string): FileEntry[] {
+type SessionTailRepair = { kind: "append-newline" } | { kind: "truncate"; length: number };
+
+interface LoadedSessionFile {
+	entries: FileEntry[];
+	tailRepair: SessionTailRepair | null;
+}
+
+function loadSessionFile(filePath: string): LoadedSessionFile {
 	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return [];
+	if (!existsSync(resolvedFilePath)) return { entries: [], tailRepair: null };
 
 	const entries: FileEntry[] = [];
 	let lastNewlineEnd = 0;
@@ -559,21 +565,23 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	}
 
 	// Validate session header
-	if (entries.length === 0) return entries;
+	if (entries.length === 0) return { entries, tailRepair: null };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return [];
+		return { entries: [], tailRepair: null };
 	}
 
-	if (hasUnterminatedTail) {
-		if (finalEntry) {
-			appendFileSync(resolvedFilePath, "\n");
-		} else {
-			truncateSync(resolvedFilePath, lastNewlineEnd);
-		}
-	}
+	const tailRepair: SessionTailRepair | null = hasUnterminatedTail
+		? finalEntry
+			? { kind: "append-newline" }
+			: { kind: "truncate", length: lastNewlineEnd }
+		: null;
+	return { entries, tailRepair };
+}
 
-	return entries;
+/** Exported for testing */
+export function loadEntriesFromFile(filePath: string): FileEntry[] {
+	return loadSessionFile(filePath).entries;
 }
 
 /**
@@ -885,6 +893,7 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private tailRepair: SessionTailRepair | null = null;
 
 	private constructor(
 		cwd: string,
@@ -892,7 +901,7 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
-		preloadedFileEntries?: FileEntry[],
+		preloadedSessionFile?: LoadedSessionFile,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
@@ -902,7 +911,7 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this._setSessionFile(sessionFile, preloadedFileEntries);
+			this._setSessionFile(sessionFile, preloadedSessionFile);
 		} else {
 			this.newSession(newSessionOptions);
 		}
@@ -913,10 +922,12 @@ export class SessionManager {
 		this._setSessionFile(sessionFile);
 	}
 
-	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
+	private _setSessionFile(sessionFile: string, preloadedSessionFile?: LoadedSessionFile): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.fileEntries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
+			const loadedSessionFile = preloadedSessionFile ?? loadSessionFile(this.sessionFile);
+			this.fileEntries = loadedSessionFile.entries;
+			this.tailRepair = loadedSessionFile.tailRepair;
 
 			// If file was empty, initialize it with a valid session header. If it was
 			// non-empty but did not parse as a pi session, fail without modifying it.
@@ -968,6 +979,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.tailRepair = null;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1007,6 +1019,18 @@ export class SessionManager {
 		} finally {
 			closeSync(fd);
 		}
+		this.tailRepair = null;
+	}
+
+	private _repairTailBeforeAppend(): void {
+		if (!this.sessionFile || !this.tailRepair) return;
+
+		if (this.tailRepair.kind === "append-newline") {
+			appendFileSync(this.sessionFile, "\n");
+		} else {
+			truncateSync(this.sessionFile, this.tailRepair.length);
+		}
+		this.tailRepair = null;
 	}
 
 	isPersisted(): boolean {
@@ -1035,6 +1059,7 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
+		this._repairTailBeforeAppend();
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
@@ -1493,6 +1518,7 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this.tailRepair = null;
 			this._buildIndex();
 
 			// Only write the file now if it contains an assistant message.
@@ -1551,7 +1577,7 @@ export class SessionManager {
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
 		let header: SessionHeader | null = null;
-		let preloadedFileEntries: FileEntry[] | undefined;
+		let preloadedSessionFile: LoadedSessionFile | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
 			try {
 				header = readSessionHeader(resolvedPath);
@@ -1559,15 +1585,15 @@ export class SessionManager {
 				if (!(error instanceof SessionHeaderScanLimitError)) throw error;
 				// The bounded scan is only a discovery optimization. A full load remains
 				// authoritative for legacy files with very large headers or prefixes.
-				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
-				const firstEntry = preloadedFileEntries[0];
+				preloadedSessionFile = loadSessionFile(resolvedPath);
+				const firstEntry = preloadedSessionFile.entries[0];
 				header = firstEntry?.type === "session" ? firstEntry : null;
 			}
 		}
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedSessionFile);
 	}
 
 	/**

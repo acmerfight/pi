@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -60,11 +60,13 @@ describe("regression #8: unterminated session tail", () => {
 		const { file } = createPersistedSession();
 		const intactContent = readFileSync(file);
 		appendFileSync(file, '{"type":"message","content":"残');
+		const tornContent = readFileSync(file);
 
 		const recovered = SessionManager.open(file, tempDir);
-		expect(readFileSync(file)).toEqual(intactContent);
+		expect(readFileSync(file)).toEqual(tornContent);
 
 		recovered.appendMessage(userMessage("u2"));
+		expect(readFileSync(file).subarray(0, intactContent.length)).toEqual(intactContent);
 		recovered.appendMessage(assistantMessage("a2"));
 		recovered.appendMessage(userMessage("u3"));
 		expect(recovered.getBranch()).toHaveLength(5);
@@ -81,10 +83,11 @@ describe("regression #8: unterminated session tail", () => {
 		const { file } = createPersistedSession();
 		const content = readFileSync(file);
 		expect(content.at(-1)).toBe(0x0a);
-		writeFileSync(file, content.subarray(0, content.length - 1));
+		const unterminatedContent = content.subarray(0, content.length - 1);
+		writeFileSync(file, unterminatedContent);
 
 		const recovered = SessionManager.open(file, tempDir);
-		expect(readFileSync(file).at(-1)).toBe(0x0a);
+		expect(readFileSync(file)).toEqual(unterminatedContent);
 		recovered.appendMessage(userMessage("u2"));
 
 		const restored = SessionManager.open(file, tempDir);
@@ -92,6 +95,51 @@ describe("regression #8: unterminated session tail", () => {
 		expect(restored.getBranch().map((entry) => (entry.type === "message" ? entry.message.role : entry.type))).toEqual(
 			["user", "assistant", "user"],
 		);
+		expectValidJsonl(file);
+	});
+
+	it("opens a read-only file without repairing its invalid tail", () => {
+		const { file } = createPersistedSession();
+		appendFileSync(file, '{"type":"message"');
+		const tornContent = readFileSync(file);
+		chmodSync(file, 0o444);
+
+		try {
+			const recovered = SessionManager.open(file, tempDir);
+			expect(recovered.getBranch()).toHaveLength(2);
+			expect(readFileSync(file)).toEqual(tornContent);
+		} finally {
+			chmodSync(file, 0o644);
+		}
+	});
+
+	it("does not repair the source file when forking", () => {
+		const { file } = createPersistedSession();
+		appendFileSync(file, '{"type":"message"');
+		const tornContent = readFileSync(file);
+		const targetDir = join(tempDir, "fork");
+		mkdirSync(targetDir);
+
+		const forked = SessionManager.forkFrom(file, targetDir, targetDir);
+		expect(forked.getBranch()).toHaveLength(2);
+		expect(readFileSync(file)).toEqual(tornContent);
+		expectValidJsonl(forked.getSessionFile()!);
+	});
+
+	it("repairs an invalid fragment after a header before the first message append", () => {
+		const { file } = createPersistedSession();
+		const content = readFileSync(file);
+		const headerEnd = content.indexOf(0x0a) + 1;
+		const tornContent = Buffer.concat([content.subarray(0, headerEnd), Buffer.from('{"type":"message"')]);
+		writeFileSync(file, tornContent);
+
+		const recovered = SessionManager.open(file, tempDir);
+		expect(recovered.getBranch()).toHaveLength(0);
+		expect(readFileSync(file)).toEqual(tornContent);
+
+		recovered.appendMessage(userMessage("u1"));
+		const restored = SessionManager.open(file, tempDir);
+		expect(restored.getBranch()).toHaveLength(1);
 		expectValidJsonl(file);
 	});
 });
