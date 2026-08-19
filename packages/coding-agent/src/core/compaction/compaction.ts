@@ -20,6 +20,7 @@ import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
+	filterSupersededSessionEntries,
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
@@ -95,8 +96,14 @@ function extractFileOperations(
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
  */
-function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
+function getMessageFromEntryForCompaction(
+	entry: SessionEntry,
+	additionalSupersededEntryIds: ReadonlySet<string> = new Set(),
+): AgentMessage | undefined {
 	if (entry.type === "compaction") {
+		return undefined;
+	}
+	if (entry.type === "message" && entry.message.role === "assistant" && additionalSupersededEntryIds.has(entry.id)) {
 		return undefined;
 	}
 	return sessionEntryToContextMessages(entry)[0];
@@ -458,6 +465,16 @@ export function findCutPoint(
 	endIndex: number,
 	keepRecentTokens: number,
 ): CutPointResult {
+	return findCutPointForCompaction(entries, startIndex, endIndex, keepRecentTokens, new Set());
+}
+
+function findCutPointForCompaction(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+	additionalSupersededEntryIds: ReadonlySet<string>,
+): CutPointResult {
 	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
 
 	if (cutPoints.length === 0) {
@@ -470,10 +487,8 @@ export function findCutPoint(
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
-		const messageTokens = sessionEntryToContextMessages(entry).reduce(
-			(sum, message) => sum + estimateTokens(message),
-			0,
-		);
+		const message = getMessageFromEntryForCompaction(entry, additionalSupersededEntryIds);
+		const messageTokens = message ? estimateTokens(message) : 0;
 		if (messageTokens === 0) continue;
 		accumulatedTokens += messageTokens;
 
@@ -486,6 +501,25 @@ export function findCutPoint(
 					break;
 				}
 			}
+
+			// If the visible part of one interrupted turn exceeds the budget, keep its
+			// excluded final assistant as a structural split point. This lets compaction
+			// summarize the turn prefix without counting or sending the failed attempt.
+			if (isTurnStartEntry(entries[cutIndex])) {
+				const structuralCutPoint = cutPoints.find((candidate) => {
+					if (candidate <= cutIndex) return false;
+					const candidateEntry = entries[candidate];
+					return (
+						candidateEntry.type === "message" &&
+						candidateEntry.message.role === "assistant" &&
+						additionalSupersededEntryIds.has(candidateEntry.id) &&
+						findTurnStartIndex(entries, candidate, startIndex) === cutIndex
+					);
+				});
+				if (structuralCutPoint !== undefined) {
+					cutIndex = structuralCutPoint;
+				}
+			}
 			break;
 		}
 	}
@@ -494,7 +528,10 @@ export function findCutPoint(
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
 		// Stop at compaction boundaries or context-visible entries.
-		if (prevEntry.type === "compaction" || sessionEntryToContextMessages(prevEntry).length > 0) {
+		if (
+			prevEntry.type === "compaction" ||
+			getMessageFromEntryForCompaction(prevEntry, additionalSupersededEntryIds) !== undefined
+		) {
 			break;
 		}
 		cutIndex--;
@@ -860,9 +897,15 @@ export interface CompactionPreparation {
 }
 
 export function prepareCompaction(
-	pathEntries: SessionEntry[],
+	branchEntries: SessionEntry[],
 	settings: CompactionSettings,
+	additionalSupersededEntryIds: readonly string[] = [],
 ): CompactionPreparation | undefined {
+	// Keep the current failed attempt as a structural cut point, but never include it
+	// in token accounting or summarization input. Durable superseded attempts can be
+	// removed entirely because their replacements already exist on the branch.
+	const pathEntries = filterSupersededSessionEntries(branchEntries);
+	const additionalSupersededEntryIdSet = new Set(additionalSupersededEntryIds);
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
@@ -885,9 +928,17 @@ export function prepareCompaction(
 	}
 	const boundaryEnd = pathEntries.length;
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
+	const tokensBefore = estimateContextTokens(
+		buildSessionContext(branchEntries, undefined, undefined, additionalSupersededEntryIds).messages,
+	).tokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	const cutPoint = findCutPointForCompaction(
+		pathEntries,
+		boundaryStart,
+		boundaryEnd,
+		settings.keepRecentTokens,
+		additionalSupersededEntryIdSet,
+	);
 
 	// Get UUID of first kept entry
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
@@ -901,7 +952,7 @@ export function prepareCompaction(
 	// Messages to summarize (will be discarded after summary)
 	const messagesToSummarize: AgentMessage[] = [];
 	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
+		const msg = getMessageFromEntryForCompaction(pathEntries[i], additionalSupersededEntryIdSet);
 		if (msg) messagesToSummarize.push(msg);
 	}
 
@@ -911,7 +962,7 @@ export function prepareCompaction(
 	const turnPrefixMessages: AgentMessage[] = [];
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
+			const msg = getMessageFromEntryForCompaction(pathEntries[i], additionalSupersededEntryIdSet);
 			if (msg) turnPrefixMessages.push(msg);
 		}
 	}

@@ -53,6 +53,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Earlier assistant attempts replaced by this entry and omitted from model context. */
+	supersedesEntryIds?: string[];
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -407,20 +409,27 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	return [];
 }
 
-/**
- * Build the active, compaction-aware session entry list.
- *
- * This follows the current leaf path. If the path contains compaction entries,
- * the latest compaction is represented by the compaction entry itself, followed
- * by the kept entries starting at firstKeptEntryId and all entries after the
- * compaction entry. Older summarized entries are omitted.
- */
-export function buildContextEntries(
-	entries: SessionEntry[],
-	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
+/** Remove assistant attempts explicitly superseded on one session branch. */
+export function filterSupersededSessionEntries(
+	path: SessionEntry[],
+	additionalSupersededEntryIds: readonly string[] = [],
 ): SessionEntry[] {
-	const path = buildSessionPath(entries, leafId, byId);
+	const supersededEntryIds = new Set(additionalSupersededEntryIds);
+	for (const entry of path) {
+		if (entry.type !== "message" || !Array.isArray(entry.supersedesEntryIds)) continue;
+		for (const entryId of entry.supersedesEntryIds) {
+			if (typeof entryId === "string") {
+				supersededEntryIds.add(entryId);
+			}
+		}
+	}
+
+	return path.filter(
+		(entry) => entry.type !== "message" || entry.message.role !== "assistant" || !supersededEntryIds.has(entry.id),
+	);
+}
+
+function buildCompactionAwareContextEntries(path: SessionEntry[]): SessionEntry[] {
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -454,6 +463,23 @@ export function buildContextEntries(
 }
 
 /**
+ * Build the active, compaction-aware session entry list.
+ *
+ * This follows the current leaf path. If the path contains compaction entries,
+ * the latest compaction is represented by the compaction entry itself, followed
+ * by the kept entries starting at firstKeptEntryId and all entries after the
+ * compaction entry. Older summarized entries are omitted.
+ */
+export function buildContextEntries(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+): SessionEntry[] {
+	const path = buildSessionPath(entries, leafId, byId);
+	return buildCompactionAwareContextEntries(path);
+}
+
+/**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
@@ -462,10 +488,11 @@ export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	additionalSupersededEntryIds: readonly string[] = [],
 ): SessionContext {
-	const path = buildSessionPath(entries, leafId, byId);
+	const path = filterSupersededSessionEntries(buildSessionPath(entries, leafId, byId), additionalSupersededEntryIds);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
+	const messages = buildCompactionAwareContextEntries(path).flatMap(sessionEntryToContextMessages);
 	return { messages, thinkingLevel, model };
 }
 
@@ -1054,13 +1081,17 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	appendMessage(
+		message: Message | CustomMessage | BashExecutionMessage,
+		supersedesEntryIds: readonly string[] = [],
+	): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
+			...(supersedesEntryIds.length > 0 ? { supersedesEntryIds: [...new Set(supersedesEntryIds)] } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1270,7 +1301,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Build the active, compaction-aware entry list for context/rendering.
+	 * Build the active, compaction-aware entry list for rendering.
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
@@ -1281,8 +1312,8 @@ export class SessionManager {
 	 * Build the session context (what gets sent to the LLM).
 	 * Uses tree traversal from current leaf.
 	 */
-	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+	buildSessionContext(additionalSupersededEntryIds: readonly string[] = []): SessionContext {
+		return buildSessionContext(this.getEntries(), this.leafId, this.byId, additionalSupersededEntryIds);
 	}
 
 	/**

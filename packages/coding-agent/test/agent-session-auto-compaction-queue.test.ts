@@ -156,11 +156,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (
+						reason: "overflow" | "threshold",
+						willRetry: boolean,
+						additionalSupersededEntryIds?: readonly string[],
+					) => Promise<boolean>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockResolvedValue(false);
 
 		const events: Array<{ type: string; reason: string; errorMessage?: string }> = [];
 		session.subscribe((event) => {
@@ -171,11 +175,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const checkCompaction = (
 			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
+				_checkCompaction: (
+					assistantMessage: AssistantMessage,
+					skipAbortedCheck?: boolean,
+					assistantEntryId?: string,
+				) => Promise<boolean>;
 			}
 		)._checkCompaction.bind(session);
 
-		await checkCompaction(overflowMessage);
+		await checkCompaction(overflowMessage, true, "overflow-entry");
 		await checkCompaction({ ...overflowMessage, timestamp: Date.now() + 1 });
 
 		expect(runAutoCompactionSpy).toHaveBeenCalledTimes(1);

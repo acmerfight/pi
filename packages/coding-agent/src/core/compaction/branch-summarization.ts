@@ -15,7 +15,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import { filterSupersededSessionEntries, type ReadonlySessionManager, type SessionEntry } from "../session-manager.ts";
 import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -193,6 +193,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
 export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
+	const projectedEntries = filterSupersededSessionEntries(entries);
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
 	let totalTokens = 0;
@@ -200,7 +201,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
 	// This ensures we capture cumulative file tracking from nested branch summaries
 	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
-	for (const entry of entries) {
+	for (const entry of projectedEntries) {
 		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
 			const details = entry.details as BranchSummaryDetails;
 			if (Array.isArray(details.readFiles)) {
@@ -216,8 +217,8 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	}
 
 	// Second pass: walk from newest to oldest, adding messages until token budget
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
+	for (let i = projectedEntries.length - 1; i >= 0; i--) {
+		const entry = projectedEntries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
 
