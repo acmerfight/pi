@@ -4,16 +4,37 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEventBus } from "../../../src/core/event-bus.ts";
 import { loadExtensions } from "../../../src/core/extensions/loader.ts";
+import type { ExtensionAPI, ProviderConfig } from "../../../src/core/extensions/types.ts";
 
 interface FailureState {
 	eventCalls: number;
 	flagDuringLoad?: boolean | string;
+	capturedApi?: ExtensionAPI;
 }
 
 function failureState(): FailureState {
 	const global = globalThis as typeof globalThis & { __extensionFactoryFailureState?: FailureState };
 	global.__extensionFactoryFailureState ??= { eventCalls: 0 };
 	return global.__extensionFactoryFailureState;
+}
+
+function providerConfig(modelId: string): ProviderConfig {
+	return {
+		baseUrl: "https://provider.test/v1",
+		apiKey: "provider-test-key",
+		api: "openai-completions",
+		models: [
+			{
+				id: modelId,
+				name: modelId,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8192,
+				maxTokens: 1024,
+			},
+		],
+	};
 }
 
 describe("issue #11 extension factory failure", () => {
@@ -43,7 +64,7 @@ describe("issue #11 extension factory failure", () => {
 		writeFileSync(
 			workingPath,
 			`export default function (pi) {
-	pi.registerProvider("working-provider", {});
+	pi.registerProvider("working-provider", ${JSON.stringify(providerConfig("working-model"))});
 }
 `,
 		);
@@ -51,7 +72,7 @@ describe("issue #11 extension factory failure", () => {
 			failingPath,
 			`export default function (pi) {
 	pi.unregisterProvider("working-provider");
-	pi.registerProvider("failed-provider", {});
+	pi.registerProvider("failed-provider", ${JSON.stringify(providerConfig("failed-model"))});
 	throw new Error("factory failed");
 }
 `,
@@ -72,10 +93,11 @@ describe("issue #11 extension factory failure", () => {
 		writeFileSync(
 			failingPath,
 			`export default function (pi) {
+	globalThis.__extensionFactoryFailureState.capturedApi = pi;
 	pi.events.on("factory-failure", () => globalThis.__extensionFactoryFailureState.eventCalls++);
 	pi.registerFlag("failed-flag", { type: "boolean", default: true });
 	globalThis.__extensionFactoryFailureState.flagDuringLoad = pi.getFlag("failed-flag");
-	pi.registerProvider("failed-provider", {});
+	pi.registerProvider("failed-provider", ${JSON.stringify(providerConfig("failed-model"))});
 	throw new Error("factory failed");
 }
 `,
@@ -87,9 +109,13 @@ describe("issue #11 extension factory failure", () => {
 
 		expect(result.extensions).toHaveLength(0);
 		expect(result.errors).toEqual([{ path: failingPath, error: "Failed to load extension: factory failed" }]);
-		expect.soft(failureState().flagDuringLoad).toBe(true);
-		expect.soft(result.runtime.flagValues.has("failed-flag")).toBe(false);
-		expect.soft(result.runtime.pendingProviderRegistrations).toHaveLength(0);
-		expect.soft(failureState().eventCalls).toBe(0);
+		expect(failureState().flagDuringLoad).toBe(true);
+		expect(result.runtime.flagValues.has("failed-flag")).toBe(false);
+		expect(result.runtime.pendingProviderRegistrations).toHaveLength(0);
+		expect(failureState().eventCalls).toBe(0);
+		expect(() => failureState().capturedApi?.registerFlag("late-flag", { type: "boolean", default: true })).toThrow(
+			`Extension "${failingPath}" failed to load and its API is no longer active.`,
+		);
+		expect(result.runtime.flagValues.has("late-flag")).toBe(false);
 	});
 });
