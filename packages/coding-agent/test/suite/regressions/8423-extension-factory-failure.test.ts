@@ -37,7 +37,7 @@ function providerConfig(modelId: string): ProviderConfig {
 	};
 }
 
-describe("issue #11 extension factory failure", () => {
+describe("issue #8423 extension factory failure", () => {
 	const roots: string[] = [];
 
 	function fixture(): { cwd: string; extensionPath: (name: string) => string } {
