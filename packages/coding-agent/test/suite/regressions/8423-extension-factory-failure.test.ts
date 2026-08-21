@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEventBus } from "../../../src/core/event-bus.ts";
-import { loadExtensions } from "../../../src/core/extensions/loader.ts";
+import {
+	createExtensionRuntime,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../../../src/core/extensions/loader.ts";
 import type { ExtensionAPI, ProviderConfig } from "../../../src/core/extensions/types.ts";
 
 interface FailureState {
@@ -83,6 +87,43 @@ describe("issue #8423 extension factory failure", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.errors).toEqual([{ path: failingPath, error: "Failed to load extension: factory failed" }]);
 		expect(result.runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(["working-provider"]);
+	});
+
+	it("does not roll back a concurrently loaded factory's provider", async () => {
+		const runtime = createExtensionRuntime();
+		const eventBus = createEventBus();
+		let markFailingStarted!: () => void;
+		const failingStarted = new Promise<void>((resolve) => {
+			markFailingStarted = resolve;
+		});
+		let releaseFailing!: () => void;
+		const waitBeforeFailure = new Promise<void>((resolve) => {
+			releaseFailing = resolve;
+		});
+		const failingLoad = loadExtensionFromFactory(
+			async (pi) => {
+				pi.registerProvider("failed-provider", providerConfig("failed-model"));
+				markFailingStarted();
+				await waitBeforeFailure;
+				throw new Error("factory failed");
+			},
+			process.cwd(),
+			eventBus,
+			runtime,
+			"<failing>",
+		);
+		await failingStarted;
+		await loadExtensionFromFactory(
+			(pi) => pi.registerProvider("working-provider", providerConfig("working-model")),
+			process.cwd(),
+			eventBus,
+			runtime,
+			"<working>",
+		);
+		releaseFailing();
+
+		await expect(failingLoad).rejects.toThrow("factory failed");
+		expect(runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(["working-provider"]);
 	});
 
 	it("discards shared runtime state from a failed factory", async () => {
