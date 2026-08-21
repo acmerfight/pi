@@ -113,6 +113,7 @@ describe("issue #11 extension factory failure", () => {
 		expect(result.runtime.flagValues.has("failed-flag")).toBe(false);
 		expect(result.runtime.pendingProviderRegistrations).toHaveLength(0);
 		expect(failureState().eventCalls).toBe(0);
+		expect(failureState().capturedApi).toBeDefined();
 		expect(() => failureState().capturedApi?.registerFlag("late-flag", { type: "boolean", default: true })).toThrow(
 			`Extension "${failingPath}" failed to load and its API is no longer active.`,
 		);
